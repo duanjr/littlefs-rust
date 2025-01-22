@@ -3,4 +3,15 @@ name = "littlefs-rust"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "basic_test"
+path = "tests/basic_test.rs"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+
 [dependencies]
