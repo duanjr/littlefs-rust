@@ -14,4 +14,13 @@ path = "tests/basic_test.rs"
 name = "demo"
 path = "examples/demo.rs"
 
+[features]
+default = []
+lfs_no_malloc = []
+lfs_no_assert = []
+lfs_no_debug = []
+lfs_no_warn = []
+lfs_no_error = []
+lfs_trace = []
+
 [dependencies]
