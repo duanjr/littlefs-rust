@@ -1,542 +1,7 @@
-/*
- * The little filesystem
- *
- * Copyright (c) 2022, The littlefs authors.
- * Copyright (c) 2017, Arm Limited. All rights reserved.
- * SPDX-License-Identifier: BSD-3-Clause
- */
+use crate::lfs_utils;
+use core::ffi::c_void;
+use crate::lfs_strucs;
 
- use crate::lfs_util;
- use core::ffi::c_void;
- 
- /// 版本信息
- 
- // 软件库版本
- // 高16位为主版本号，在向后不兼容变更时递增
- // 低16位为次版本号，在添加功能时递增
- pub const LFS_VERSION: u32 = 0x0002000a;
- pub const LFS_VERSION_MAJOR: u32 = 0xffff & (LFS_VERSION >> 16);
- pub const LFS_VERSION_MINOR: u32 = 0xffff & (LFS_VERSION >> 0);
- 
- // 磁盘数据结构版本
- // 高16位为主版本号，在向后不兼容变更时递增
- // 低16位为次版本号，在添加功能时递增
- pub const LFS_DISK_VERSION: u32 = 0x00020001;
- pub const LFS_DISK_VERSION_MAJOR: u32 = 0xffff & (LFS_DISK_VERSION >> 16);
- pub const LFS_DISK_VERSION_MINOR: u32 = 0xffff & (LFS_DISK_VERSION >> 0);
- 
- /// 基本类型定义
- pub type LfsSize = u32;
- pub type LfsOff = u32;
- pub type LfsSsize = i32;
- pub type LfsSoff = i32;
- pub type LfsBlock = u32;
- 
- /// 最大名称大小（字节），可重新定义以减小info结构体的大小
- /// 限制为 <= 1022。存储在超级块中，其他littlefs驱动程序必须遵守
- pub const LFS_NAME_MAX: usize = 255;
- 
- /// 文件最大大小（字节），可重新定义以支持其他驱动程序
- /// 在磁盘上限制为 <= 2147483647。存储在超级块中，其他littlefs驱动程序必须遵守
- pub const LFS_FILE_MAX: u32 = 2147483647;
- 
- /// 自定义属性的最大大小（字节），可重新定义，但使用较小的LFS_ATTR_MAX没有实际好处
- /// 限制为 <= 1022。存储在超级块中，其他littlefs驱动程序必须遵守
- pub const LFS_ATTR_MAX: usize = 1022;
- 
- /// 可能的错误代码，这些是负数以允许有效的正返回值
- #[repr(i32)]
- #[derive(Debug, PartialEq, Eq, Clone, Copy)]
- pub enum LfsError {
-     Ok = 0,         // 没有错误
-     Io = -5,        // 设备操作期间出错
-     Corrupt = -84,  // 已损坏
-     NoEnt = -2,     // 没有目录条目
-     Exist = -17,    // 条目已存在
-     NotDir = -20,   // 条目不是目录
-     IsDir = -21,    // 条目是目录
-     NotEmpty = -39, // 目录不为空
-     BadF = -9,      // 错误的文件编号
-     FBig = -27,     // 文件太大
-     Inval = -22,    // 无效参数
-     NoSpc = -28,    // 设备上没有剩余空间
-     NoMem = -12,    // 没有更多可用内存
-     NoAttr = -61,   // 没有可用的数据/属性
-     NameTooLong = -36, // 文件名太长
- }
- 
- /// 文件类型
- #[repr(u16)]
- #[derive(Debug, PartialEq, Eq, Clone, Copy)]
- pub enum LfsType {
-     // 文件类型
-     Reg = 0x001,
-     Dir = 0x002,
- 
-     // 内部使用的类型
-     Splice = 0x400,
-     Name = 0x000,
-     Struct = 0x200,
-     UserAttr = 0x300,
-     From = 0x100,
-     Tail = 0x600,
-     Globals = 0x700,
-     Crc = 0x500,
- 
-     // 内部使用的类型特化
-     Create = 0x401,
-     Delete = 0x4ff,
-     SuperBlock = 0x0ff,
-     DirStruct = 0x200,
-     CtzStruct = 0x202,
-     InlineStruct = 0x201,
-     SoftTail = 0x600,
-     HardTail = 0x601,
-     MoveState = 0x7ff,
-     CCrc = 0x500,
-     FCrc = 0x5ff,
- 
-     // 内部芯片源
-     FromNoop = 0x000,
-     FromMove = 0x101,
-     FromUserAttrs = 0x102,
- }
- 
- /// 文件打开标志
- #[repr(u32)]
- #[derive(Debug, PartialEq, Eq, Clone, Copy)]
- pub enum LfsOpenFlags {
-     // 打开标志
-     RdOnly = 1,        // 以只读方式打开文件
-     WrOnly = 2,        // 以只写方式打开文件
-     RdWr = 3,          // 以读写方式打开文件
-     Creat = 0x0100,    // 如果文件不存在则创建
-     Excl = 0x0200,     // 如果文件已存在则失败
-     Trunc = 0x0400,    // 将现有文件截断为零大小
-     Append = 0x0800,   // 每次写入时移动到文件末尾
- 
-     // 内部使用的标志
-     Dirty = 0x010000,   // 文件与存储不匹配
-     Writing = 0x020000, // 自上次刷新以来文件已被写入
-     Reading = 0x040000, // 自上次刷新以来文件已被读取
-     Erred = 0x080000,   // 写入期间发生错误
-     Inline = 0x100000,  // 当前内联在目录条目中
- }
- 
- /// 文件查找标志
- #[repr(i32)]
- #[derive(Debug, PartialEq, Eq, Clone, Copy)]
- pub enum LfsWhenceFlags {
-     Set = 0,   // 相对于绝对位置查找
-     Cur = 1,   // 相对于当前文件位置查找
-     End = 2,   // 相对于文件末尾查找
- }
- 
- /// 文件系统配置
- #[derive(Debug)]
- pub struct LfsConfig {
-     // 用户提供的上下文，可用于向块设备操作传递信息
-     pub context: *mut c_void,
- 
-     // 读取块中的区域。负错误代码传递给用户
-     pub read: Option<unsafe extern "C" fn(c: *const LfsConfig, block: LfsBlock, 
-         off: LfsOff, buffer: *mut c_void, size: LfsSize) -> i32>,
- 
-     // 写入块中的区域。该块必须已先被擦除。负错误代码传递给用户
-     // 如果块应被视为坏块，可能返回LFS_ERR_CORRUPT
-     pub prog: Option<unsafe extern "C" fn(c: *const LfsConfig, block: LfsBlock, 
-         off: LfsOff, buffer: *const c_void, size: LfsSize) -> i32>,
- 
-     // 擦除块。必须先擦除块，然后才能写入。已擦除块的状态未定义
-     // 负错误代码传递给用户。如果块应被视为坏块，可能返回LFS_ERR_CORRUPT
-     pub erase: Option<unsafe extern "C" fn(c: *const LfsConfig, block: LfsBlock) -> i32>,
- 
-     // 同步底层块设备的状态。负错误代码传递给用户
-     pub sync: Option<unsafe extern "C" fn(c: *const LfsConfig) -> i32>,
- 
-     // 锁定底层块设备。负错误代码传递给用户（仅在启用线程安全时）
-     pub lock: Option<unsafe extern "C" fn(c: *const LfsConfig) -> i32>,
- 
-     // 解锁底层块设备。负错误代码传递给用户（仅在启用线程安全时）
-     pub unlock: Option<unsafe extern "C" fn(c: *const LfsConfig) -> i32>,
- 
-     // 块读取的最小大小（字节）。所有读取操作都是此值的倍数
-     pub read_size: LfsSize,
- 
-     // 块写入的最小大小（字节）。所有写入操作都是此值的倍数
-     pub prog_size: LfsSize,
- 
-     // 可擦除块的大小（字节）。这不影响内存消耗，可能大于物理擦除大小
-     // 但是，非内联文件至少占用一个块。必须是读取和写入大小的倍数
-     pub block_size: LfsSize,
- 
-     // 设备上可擦除块的数量。为零时，默认使用存储在磁盘上的块数量
-     pub block_count: LfsSize,
- 
-     // littlefs在驱逐元数据日志并将元数据移动到另一个块之前的擦除周期数
-     // 建议值在100-1000范围内，较大的值性能更好，但磨损分布一致性较差
-     // 设置为-1以禁用块级磨损均衡
-     pub block_cycles: i32,
- 
-     // 块缓存大小（字节）。每个缓存在RAM中缓冲块的一部分
-     // littlefs需要一个读缓存、一个写缓存和每个文件一个额外的缓存
-     // 更大的缓存可通过存储更多数据并减少磁盘访问次数来提高性能
-     // 必须是读取和写入大小的倍数，以及块大小的因子
-     pub cache_size: LfsSize,
- 
-     // 前瞻缓冲区大小（字节）。更大的前瞻缓冲区可在分配过程中找到更多块
-     // 前瞻缓冲区存储为紧凑位图，因此每字节RAM可跟踪8个块
-     pub lookahead_size: LfsSize,
- 
-     // lfs_fs_gc期间元数据压缩的阈值（字节）。超过此阈值的元数据对将在lfs_fs_gc期间被压缩
-     // 为零时默认为~88%块大小，但未来可能会更改
-     // 设置为-1以在lfs_fs_gc期间禁用元数据压缩
-     pub compact_thresh: LfsSize,
- 
-     // 可选的静态分配读缓冲区。必须为cache_size大小
-     // 默认使用lfs_malloc分配此缓冲区
-     pub read_buffer: *mut c_void,
- 
-     // 可选的静态分配写缓冲区。必须为cache_size大小
-     // 默认使用lfs_malloc分配此缓冲区
-     pub prog_buffer: *mut c_void,
- 
-     // 可选的静态分配前瞻缓冲区。必须为lookahead_size大小
-     // 默认使用lfs_malloc分配此缓冲区
-     pub lookahead_buffer: *mut c_void,
- 
-     // 文件名长度的可选上限（字节）。较大名称的唯一缺点是info结构体的大小
-     // 由LFS_NAME_MAX定义控制。为零时默认为LFS_NAME_MAX或存储在磁盘上的name_max
-     pub name_max: LfsSize,
- 
-     // 文件大小的可选上限（字节）。较大文件没有缺点，但必须 <= LFS_FILE_MAX
-     // 为零时默认为LFS_FILE_MAX或存储在磁盘上的file_max
-     pub file_max: LfsSize,
- 
-     // 自定义属性大小的可选上限（字节）。较大的属性大小没有缺点，但必须 <= LFS_ATTR_MAX
-     // 为零时默认为LFS_ATTR_MAX或存储在磁盘上的attr_max
-     pub attr_max: LfsSize,
- 
-     // 为元数据对给定的总空间的可选上限（字节）。在有大块的设备上（例如128kB）
-     // 将此设置为较小的大小（2-8kB）可帮助限制元数据压缩时间。必须 <= block_size
-     // 为零时默认为block_size
-     pub metadata_max: LfsSize,
- 
-     // 内联文件的可选上限（字节）。内联文件存在于元数据中，减少存储需求
-     // 但可能受限以提高元数据相关性能。必须 <= cache_size，<= attr_max，<= block_size/8
-     // 为零时默认为可能的最大inline_max。设置为-1以禁用内联文件
-     pub inline_max: LfsSize,
- 
-     // 写入时使用的磁盘版本，格式为16位主版本 + 16位次版本
-     // 这限制了元数据对较旧次版本支持的内容。注意某些功能将丢失
-     // 为零时默认为最新的次版本
-     pub disk_version: u32,
- }
- 
- /// 文件信息结构
- #[derive(Debug, Clone)]
- pub struct LfsInfo {
-     // 文件类型，LFS_TYPE_REG或LFS_TYPE_DIR
-     pub type_: u8,
- 
-     // 文件大小，仅对REG文件有效。限制为32位
-     pub size: LfsSize,
- 
-     // 文件名，存储为以null结尾的字符串。限制为LFS_NAME_MAX+1
-     // 可通过重新定义LFS_NAME_MAX减少RAM。LFS_NAME_MAX存储在超级块中
-     // 其他littlefs驱动程序必须遵守
-     pub name: [u8; LFS_NAME_MAX+1],
- }
- 
- /// 文件系统信息结构
- #[derive(Debug, Clone)]
- pub struct LfsFsinfo {
-     // 磁盘版本
-     pub disk_version: u32,
- 
-     // 逻辑块大小（字节）
-     pub block_size: LfsSize,
- 
-     // 文件系统中的逻辑块数量
-     pub block_count: LfsSize,
- 
-     // 文件名长度的上限（字节）
-     pub name_max: LfsSize,
- 
-     // 文件大小的上限（字节）
-     pub file_max: LfsSize,
- 
-     // 自定义属性大小的上限（字节）
-     pub attr_max: LfsSize,
- }
- 
- /// 自定义属性结构，用于描述在文件写入期间原子提交的自定义属性
- #[derive(Debug)]
- pub struct LfsAttr {
-     // 属性的8位类型，由用户提供并用于识别属性
-     pub type_: u8,
- 
-     // 指向包含属性的缓冲区的指针
-     pub buffer: *mut c_void,
- 
-     // 属性大小（字节），限制为LFS_ATTR_MAX
-     pub size: LfsSize,
- }
- 
- /// lfs_file_opencfg期间提供的可选配置
- #[derive(Debug)]
- pub struct LfsFileConfig {
-     // 可选的静态分配文件缓冲区。必须为cache_size大小
-     // 默认使用lfs_malloc分配此缓冲区
-     pub buffer: *mut c_void,
- 
-     // 与文件相关的自定义属性的可选列表。如果文件以读取访问权限打开
-     // 这些属性将在打开调用期间从磁盘读取。如果文件以写入访问权限打开
-     // 属性将在每次文件同步或关闭时写入磁盘。此写入与文件内容的更新原子发生
-     //
-     // 自定义属性由8位类型唯一标识，并限制为LFS_ATTR_MAX字节
-     // 读取时，如果存储的属性小于缓冲区，则用零填充
-     // 如果存储的属性更大，则将静默截断。如果找不到属性，则隐式创建
-     pub attrs: *mut LfsAttr,
- 
-     // 列表中的自定义属性数量
-     pub attr_count: LfsSize,
- }
- 
- /// 内部littlefs数据结构
- 
- /// 缓存结构
- #[derive(Debug, Clone)]
- pub struct LfsCache {
-     pub block: LfsBlock,
-     pub off: LfsOff,
-     pub size: LfsSize,
-     pub buffer: *mut u8,
- }
- 
- /// 元数据目录结构
- #[derive(Debug, Clone)]
- pub struct LfsMdir {
-     pub pair: [LfsBlock; 2],
-     pub rev: u32,
-     pub off: LfsOff,
-     pub etag: u32,
-     pub count: u16,
-     pub erased: bool,
-     pub split: bool,
-     pub tail: [LfsBlock; 2],
- }
- 
- /// littlefs目录类型
- #[derive(Debug)]
- pub struct LfsDir {
-     pub next: *mut LfsDir,
-     pub id: u16,
-     pub type_: u8,
-     pub m: LfsMdir,
-     pub pos: LfsOff,
-     pub head: [LfsBlock; 2],
- }
- 
- /// littlefs文件类型
- #[derive(Debug)]
- pub struct LfsFile {
-     pub next: *mut LfsFile,
-     pub id: u16,
-     pub type_: u8,
-     pub m: LfsMdir,
-     pub ctz: LfsCtz,
-     pub flags: u32,
-     pub pos: LfsOff,
-     pub block: LfsBlock,
-     pub off: LfsOff,
-     pub cache: LfsCache,
-     pub cfg: *const LfsFileConfig,
- }
- 
- /// CTZ（计数尾随零）结构
- #[derive(Debug, Clone)]
- pub struct LfsCtz {
-     pub head: LfsBlock,
-     pub size: LfsSize,
- }
- 
- /// 超级块结构
- #[derive(Debug, Clone)]
- pub struct LfsSuperblock {
-     pub version: u32,
-     pub block_size: LfsSize,
-     pub block_count: LfsSize,
-     pub name_max: LfsSize,
-     pub file_max: LfsSize,
-     pub attr_max: LfsSize,
- }
- 
- /// 全局状态结构
- #[derive(Debug, Clone)]
- pub struct LfsGstate {
-     pub tag: u32,
-     pub pair: [LfsBlock; 2],
- }
- 
- /// 挂载列表结构
- #[derive(Debug)]
- pub struct LfsMlist {
-     pub next: *mut LfsMlist,
-     pub id: u16,
-     pub type_: u8,
-     pub m: LfsMdir,
- }
- 
- /// 前瞻结构
- #[derive(Debug)]
- pub struct LfsLookahead {
-     pub start: LfsBlock,
-     pub size: LfsBlock,
-     pub next: LfsBlock,
-     pub ckpoint: LfsBlock,
-     pub buffer: *mut u8,
- }
- 
- /// LittleFS文件系统类型
- #[derive(Debug)]
- pub struct Lfs {
-     pub rcache: LfsCache,
-     pub pcache: LfsCache,
-     pub root: [LfsBlock; 2],
-     pub mlist: *mut LfsMlist,
-     pub seed: u32,
-     pub gstate: LfsGstate,
-     pub gdisk: LfsGstate,
-     pub gdelta: LfsGstate,
-     pub lookahead: LfsLookahead,
-     pub cfg: *const LfsConfig,
-     pub block_count: LfsSize,
-     pub name_max: LfsSize,
-     pub file_max: LfsSize,
-     pub attr_max: LfsSize,
-     pub inline_max: LfsSize,
-     pub lfs1: *mut c_void, // 可选的LFS1兼容性
- }
- 
- // 注意：这里省略了函数声明，因为Rust中声明和实现不必分开
- // 这些函数将在后续任务中实现
- 
- /// 特殊块值定义
- pub const LFS_BLOCK_NULL: LfsBlock = !0;   // 相当于C中的(lfs_block_t)-1
- pub const LFS_BLOCK_INLINE: LfsBlock = !1; // 相当于C中的(lfs_block_t)-2
- 
- /// 操作结果类型
- #[repr(i32)]
- #[derive(Debug, PartialEq, Eq, Clone, Copy)]
- pub enum LfsOk {
-     Relocated = 1,
-     Dropped   = 2,
-     Orphaned  = 3,
- }
- 
- /// 比较结果类型
- #[repr(i32)]
- #[derive(Debug, PartialEq, Eq, Clone, Copy)]
- pub enum LfsCmp {
-     Eq = 0,
-     Lt = 1,
-     Gt = 2,
- }
- 
- /// 标签类型定义
- pub type LfsTag = u32;
- pub type LfsStag = i32;
- 
- /// 元数据属性结构
- #[derive(Debug, Clone)]
- pub struct LfsMattr {
-     pub tag: LfsTag,
-     pub buffer: *const c_void,
- }
- 
- /// 磁盘偏移结构
- #[derive(Debug, Clone)]
- pub struct LfsDiskoff {
-     pub block: LfsBlock,
-     pub off: LfsOff,
- }
- 
- /// 文件CRC结构
- #[derive(Debug, Clone)]
- pub struct LfsFcrc {
-     pub size: LfsSize,
-     pub crc: u32,
- }
- 
- /// 目录遍历深度常量
- pub const LFS_DIR_TRAVERSE_DEPTH: usize = 3;
- 
- /// 目录遍历结构
- #[derive(Debug)]
- pub struct LfsDirTraverse {
-     pub dir: *const LfsMdir,
-     pub off: LfsOff,
-     pub ptag: LfsTag,
-     pub attrs: *const LfsMattr,
-     pub attrcount: i32,
- 
-     pub tmask: LfsTag,
-     pub ttag: LfsTag,
-     pub begin: u16,
-     pub end: u16,
-     pub diff: i16,
- 
-     pub cb: Option<unsafe extern "C" fn(data: *mut c_void, tag: LfsTag, buffer: *const c_void) -> i32>,
-     pub data: *mut c_void,
- 
-     pub tag: LfsTag,
-     pub buffer: *const c_void,
-     pub disk: LfsDiskoff,
- }
- 
- /// 目录查找匹配结构
- #[derive(Debug)]
- pub struct LfsDirFindMatch {
-     pub lfs: *mut Lfs,
-     pub name: *const c_void,
-     pub size: LfsSize,
- }
- 
- /// 提交结构
- #[derive(Debug)]
- pub struct LfsCommit {
-     pub block: LfsBlock,
-     pub off: LfsOff,
-     pub ptag: LfsTag,
-     pub crc: u32,
- 
-     pub begin: LfsOff,
-     pub end: LfsOff,
- }
- 
- /// 目录提交结构
- #[derive(Debug)]
- pub struct LfsDirCommitCommit {
-     pub lfs: *mut Lfs,
-     pub commit: *mut LfsCommit,
- }
- 
- /// 龟兔算法结构，用于检测循环
- #[derive(Debug)]
- pub struct LfsTortoise {
-     pub pair: [LfsBlock; 2],
-     pub i: LfsSize,
-     pub period: LfsSize,
- }
- 
- /// 文件系统父级匹配结构
- #[derive(Debug)]
- pub struct LfsFsParentMatch {
-     pub lfs: *mut Lfs,
-     pub pair: [LfsBlock; 2],
- }
- 
 #[inline]
 pub(crate) fn lfs_cache_drop(_lfs: &Lfs, rcache: &mut LfsCache) {
     // do not zero, cheaper if cache is readonly or only going to be
@@ -638,7 +103,7 @@ pub(crate) fn lfs_bd_read(
             && off % lfs.cfg.read_size == 0 
             && size >= lfs.cfg.read_size 
         {
-            let aligned_size = lfs_util::lfs_aligndown(diff, lfs.cfg.read_size);
+            let aligned_size = lfs_utils::lfs_aligndown(diff, lfs.cfg.read_size);
             
             let err = unsafe {
                 (lfs.cfg.read.unwrap())(
@@ -665,9 +130,9 @@ pub(crate) fn lfs_bd_read(
         
         if let Some(rcache) = rcache {
             rcache.block = block;
-            rcache.off = lfs_util::lfs_aligndown(off, lfs.cfg.read_size);
+            rcache.off = lfs_utils::lfs_aligndown(off, lfs.cfg.read_size);
             
-            let aligned_end = lfs_util::lfs_alignup(off + hint, lfs.cfg.read_size);
+            let aligned_end = lfs_utils::lfs_alignup(off + hint, lfs.cfg.read_size);
             let max_size = lfs.cfg.block_size - rcache.off;
             
             rcache.size = aligned_end
@@ -803,7 +268,7 @@ pub(crate) fn lfs_bd_flush(
     if pcache.block != LFS_BLOCK_NULL && pcache.block != LFS_BLOCK_INLINE {
         assert!(pcache.block < lfs.block_count);
         let cfg = unsafe { &*lfs.cfg };
-        let diff = lfs_util::lfs_alignup(pcache.size, cfg.prog_size);
+        let diff = lfs_utils::lfs_alignup(pcache.size, cfg.prog_size);
         let err = unsafe {
             (cfg.prog.unwrap())(
                 lfs.cfg,
@@ -930,7 +395,7 @@ pub unsafe fn lfs_bd_prog(
 
         // 初始化新的pcache条目
         (*pcache).block = block;
-        (*pcache).off = lfs_util::lfs_aligndown(off, cfg.prog_size);
+        (*pcache).off = lfs_utils::lfs_aligndown(off, cfg.prog_size);
         (*pcache).size = 0;
     }
 
@@ -1006,8 +471,8 @@ pub fn lfs_pair_issync(paira: &[LfsBlock; 2], pairb: &[LfsBlock; 2]) -> bool {
 //  lfs_pair_fromle32
 #[inline]
 pub(crate) fn lfs_pair_fromle32(pair: &mut [LfsBlock; 2]) {
-    pair[0] = lfs_util::lfs_fromle32(pair[0]);
-    pair[1] = lfs_util::lfs_fromle32(pair[1]);
+    pair[0] = lfs_utils::lfs_fromle32(pair[0]);
+    pair[1] = lfs_utils::lfs_fromle32(pair[1]);
 }
 
 //  lfs_pair_tole32
@@ -1123,17 +588,17 @@ pub fn lfs_gstate_hasmovehere(a: &LfsGstate, pair: &[LfsBlock; 2]) -> bool {
 
 //  lfs_gstate_fromle32
 pub fn lfs_gstate_fromle32(a: &mut LfsGstate) {
-    a.tag = lfs_util::lfs_fromle32(a.tag);
-    a.pair[0] = lfs_util::lfs_fromle32(a.pair[0]);
-    a.pair[1] = lfs_util::lfs_fromle32(a.pair[1]);
+    a.tag = lfs_utils::lfs_fromle32(a.tag);
+    a.pair[0] = lfs_utils::lfs_fromle32(a.pair[0]);
+    a.pair[1] = lfs_utils::lfs_fromle32(a.pair[1]);
 }
 
 //  lfs_gstate_tole32
 #[inline]
 pub fn lfs_gstate_tole32(gstate: &mut LfsGstate) {
-    gstate.tag = lfs_util::lfs_tole32(gstate.tag);
-    gstate.pair[0] = lfs_util::lfs_tole32(gstate.pair[0]);
-    gstate.pair[1] = lfs_util::lfs_tole32(gstate.pair[1]);
+    gstate.tag = lfs_utils::lfs_tole32(gstate.tag);
+    gstate.pair[0] = lfs_utils::lfs_tole32(gstate.pair[0]);
+    gstate.pair[1] = lfs_utils::lfs_tole32(gstate.pair[1]);
 }
 
 //  lfs_fcrc_fromle32
@@ -1144,14 +609,14 @@ pub fn lfs_fcrc_fromle32(fcrc: &mut LfsFcrc) {
 
 //  lfs_fcrc_tole32
 pub fn lfs_fcrc_tole32(fcrc: &mut LfsFcrc) {
-    fcrc.size = lfs_util::lfs_tole32(fcrc.size);
-    fcrc.crc = lfs_util::lfs_tole32(fcrc.crc);
+    fcrc.size = lfs_utils::lfs_tole32(fcrc.size);
+    fcrc.crc = lfs_utils::lfs_tole32(fcrc.crc);
 }
 
 //  lfs_ctz_fromle32
 pub fn lfs_ctz_fromle32(ctz: &mut LfsCtz) {
-    ctz.head = crate::lfs_util::lfs_fromle32(ctz.head);
-    ctz.size = crate::lfs_util::lfs_fromle32(ctz.size);
+    ctz.head = crate::lfs_utils::lfs_fromle32(ctz.head);
+    ctz.size = crate::lfs_utils::lfs_fromle32(ctz.size);
 }
 
 //  lfs_ctz_tole32
@@ -1163,23 +628,23 @@ pub fn lfs_ctz_tole32(ctz: &mut LfsCtz) {
 //  lfs_superblock_fromle32
 #[inline]
 pub fn lfs_superblock_fromle32(superblock: &mut LfsSuperblock) {
-    superblock.version = lfs_util::lfs_fromle32(superblock.version);
-    superblock.block_size = lfs_util::lfs_fromle32(superblock.block_size);
-    superblock.block_count = lfs_util::lfs_fromle32(superblock.block_count);
-    superblock.name_max = lfs_util::lfs_fromle32(superblock.name_max);
-    superblock.file_max = lfs_util::lfs_fromle32(superblock.file_max);
-    superblock.attr_max = lfs_util::lfs_fromle32(superblock.attr_max);
+    superblock.version = lfs_utils::lfs_fromle32(superblock.version);
+    superblock.block_size = lfs_utils::lfs_fromle32(superblock.block_size);
+    superblock.block_count = lfs_utils::lfs_fromle32(superblock.block_count);
+    superblock.name_max = lfs_utils::lfs_fromle32(superblock.name_max);
+    superblock.file_max = lfs_utils::lfs_fromle32(superblock.file_max);
+    superblock.attr_max = lfs_utils::lfs_fromle32(superblock.attr_max);
 }
 
 //  lfs_superblock_tole32
 #[inline]
 pub fn lfs_superblock_tole32(superblock: &mut LfsSuperblock) {
-    superblock.version = lfs_util::lfs_tole32(superblock.version);
-    superblock.block_size = lfs_util::lfs_tole32(superblock.block_size);
-    superblock.block_count = lfs_util::lfs_tole32(superblock.block_count);
-    superblock.name_max = lfs_util::lfs_tole32(superblock.name_max);
-    superblock.file_max = lfs_util::lfs_tole32(superblock.file_max);
-    superblock.attr_max = lfs_util::lfs_tole32(superblock.attr_max);
+    superblock.version = lfs_utils::lfs_tole32(superblock.version);
+    superblock.block_size = lfs_utils::lfs_tole32(superblock.block_size);
+    superblock.block_count = lfs_utils::lfs_tole32(superblock.block_count);
+    superblock.name_max = lfs_utils::lfs_tole32(superblock.name_max);
+    superblock.file_max = lfs_utils::lfs_tole32(superblock.file_max);
+    superblock.attr_max = lfs_utils::lfs_tole32(superblock.attr_max);
 }
 
 //  lfs_mlist_isopen
@@ -1538,9 +1003,9 @@ pub unsafe extern "C" fn lfs_dir_getread(
 
         // Load to cache
         rcache.block = LFS_BLOCK_INLINE;
-        rcache.off = lfs_util::lfs_aligndown(off, lfs.cfg.read_size);
-        rcache.size = lfs_util::lfs_min(
-            lfs_util::lfs_alignup(off + hint, lfs.cfg.read_size),
+        rcache.off = lfs_utils::lfs_aligndown(off, lfs.cfg.read_size);
+        rcache.size = lfs_utils::lfs_min(
+            lfs_utils::lfs_alignup(off + hint, lfs.cfg.read_size),
             lfs.cfg.cache_size,
         );
 
@@ -2092,8 +1557,8 @@ pub(crate) fn lfs_dir_getgstate(
     let res = lfs_dir_get(
         lfs,
         dir,
-        lfs_util::mktag(0x7ff, 0, 0),
-        lfs_util::mktag(LfsType::MoveState as u32, 0, core::mem::size_of::<LfsGstate>() as u32),
+        lfs_utils::mktag(0x7ff, 0, 0),
+        lfs_utils::mktag(LfsType::MoveState as u32, 0, core::mem::size_of::<LfsGstate>() as u32),
         &mut temp,
     );
 
@@ -2386,7 +1851,7 @@ pub fn lfs_dir_commitattr(
     tag: LfsTag,
     buffer: *const c_void,
 ) -> Result<(), LfsError> {
-    let dsize = lfs_util::lfs_tag_dsize(tag);
+    let dsize = lfs_utils::lfs_tag_dsize(tag);
     if commit.off + dsize > commit.end {
         return Err(LfsError::NoSpc);
     }
@@ -2429,7 +1894,7 @@ pub fn lfs_dir_commitattr(
 //  lfs_dir_commitcrc
 pub(crate) fn lfs_dir_commitcrc(lfs: &mut Lfs, commit: &mut LfsCommit) -> Result<(), LfsError> {
     // align to program units
-    let end = lfs_util::align_up(
+    let end = lfs_utils::align_up(
         (commit.off + 5 * core::mem::size_of::<u32>() as LfsOff).min(lfs.cfg.block_size),
         lfs.cfg.prog_size,
     );
@@ -2934,11 +2399,11 @@ pub unsafe extern "C" fn lfs_dir_splittingcompact(
                 (*lfs).cfg.as_ref().unwrap().block_size
             };
 
-            let aligned = lfs_util::lfs_alignup(
+            let aligned = lfs_utils::lfs_alignup(
                 metadata_max / 2,
                 (*lfs).cfg.as_ref().unwrap().prog_size,
             );
-            let limit = lfs_util::lfs_min(metadata_max.wrapping_sub(40), aligned);
+            let limit = lfs_utils::lfs_min(metadata_max.wrapping_sub(40), aligned);
             
             if (end - split) < 0xff && size <= limit {
                 break;
@@ -3019,7 +2484,7 @@ pub unsafe extern "C" fn lfs_dir_relocatingcommit(
                 (*dir).tail[0] = *buffer.add(0);
                 (*dir).tail[1] = *buffer.add(1);
                 (*dir).split = (attr.tag >> 16 & 1) != 0; // lfs_tag_chunk
-                lfs_util::lfs_pair_fromle32((*dir).tail.as_mut_ptr());
+                lfs_utils::lfs_pair_fromle32((*dir).tail.as_mut_ptr());
             }
             _ => {}
         }
@@ -3056,7 +2521,7 @@ pub unsafe extern "C" fn lfs_dir_relocatingcommit(
         };
 
         // Traverse attributes
-        lfs_util::lfs_pair_tole32((*dir).tail.as_mut_ptr());
+        lfs_utils::lfs_pair_tole32((*dir).tail.as_mut_ptr());
         let commit_data = LfsDirCommitCommit { lfs, commit: &mut commit };
         let err = lfs_dir_traverse(
             lfs,
@@ -3069,7 +2534,7 @@ pub unsafe extern "C" fn lfs_dir_relocatingcommit(
             Some(lfs_dir_commit_commit),
             &commit_data as *const _ as *mut c_void,
         );
-        lfs_util::lfs_pair_fromle32((*dir).tail.as_mut_ptr());
+        lfs_utils::lfs_pair_fromle32((*dir).tail.as_mut_ptr());
 
         if err != 0 {
             if err == LfsError::NoSpc as i32 || err == LfsError::Corrupt as i32 {
@@ -3091,7 +2556,7 @@ pub unsafe extern "C" fn lfs_dir_relocatingcommit(
                 return err;
             }
 
-            lfs_util::lfs_gstate_tole32(&mut delta);
+            lfs_utils::lfs_gstate_tole32(&mut delta);
             let err = lfs_dir_commitattr(
                 lfs,
                 &mut commit,
@@ -3209,7 +2674,7 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
     while !f.is_null() {
         let file = &mut *(f as *mut LfsFile);
         if dir_ref as *const _ != &file.m as *const _
-            && lfs_util::lfs_pair_cmp((*file).m.pair, dir_ref.pair) == LfsCmp::Eq as i32
+            && lfs_utils::lfs_pair_cmp((*file).m.pair, dir_ref.pair) == LfsCmp::Eq as i32
             && file.type_ == LfsType::Reg as u8
             && (file.flags & LfsOpenFlags::Inline as u32) != 0
             && file.ctz.size > (*lfs.cfg).cache_size
@@ -3246,7 +2711,7 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
     }
 
     // 更新目录引用
-    if lfs_util::lfs_pair_cmp(dir_ref.pair, lpair.as_ptr()) == LfsCmp::Eq as i32 {
+    if lfs_utils::lfs_pair_cmp(dir_ref.pair, lpair.as_ptr()) == LfsCmp::Eq as i32 {
         *dir_ref = ldir.clone();
     }
 
@@ -3259,13 +2724,13 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
 
         // 处理尾块提交
         let mut new_pair = [pdir.pair[0], pdir.pair[1]];
-        lfs_util::lfs_pair_tole32(dir_ref.tail.as_mut_ptr());
+        lfs_utils::lfs_pair_tole32(dir_ref.tail.as_mut_ptr());
         state = lfs_dir_relocatingcommit(
             lfs,
             &mut pdir,
             new_pair.as_mut_ptr(),
             LfsMattr::as_ptr(&LfsMattr {
-                tag: lfs_util::LFS_MKTAG(
+                tag: lfs_utils::LFS_MKTAG(
                     LfsType::Tail as u32 + dir_ref.split as u32,
                     0x3ff,
                     8,
@@ -3274,7 +2739,7 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
             }),
             1,
         );
-        lfs_util::lfs_pair_fromle32(dir_ref.tail.as_mut_ptr());
+        lfs_utils::lfs_pair_fromle32(dir_ref.tail.as_mut_ptr());
         if state < 0 {
             return state;
         }
@@ -3286,7 +2751,7 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
     let mut orphans = false;
     while state == LfsOk::Relocated as i32 {
         orphans = true;
-        lfs_util::lfs_debug(
+        lfs_utils::lfs_debug(
             b"Relocating {0x%"PRIx32", 0x%"PRIx32"} -> {0x%"PRIx32", 0x%"PRIx32"}" as *const u8,
             lpair[0],
             lpair[1],
@@ -3295,7 +2760,7 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
         );
 
         // 更新根目录引用
-        if lfs_util::lfs_pair_cmp(lpair.as_ptr(), lfs.root.as_ptr()) == LfsCmp::Eq as i32 {
+        if lfs_utils::lfs_pair_cmp(lpair.as_ptr(), lfs.root.as_ptr()) == LfsCmp::Eq as i32 {
             lfs.root[0] = ldir.pair[0];
             lfs.root[1] = ldir.pair[1];
         }
@@ -3304,13 +2769,13 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
         let mut d = lfs.mlist;
         while !d.is_null() {
             let mlist = &mut *d;
-            if lfs_util::lfs_pair_cmp(lpair.as_ptr(), mlist.m.pair.as_ptr()) == LfsCmp::Eq as i32 {
+            if lfs_utils::lfs_pair_cmp(lpair.as_ptr(), mlist.m.pair.as_ptr()) == LfsCmp::Eq as i32 {
                 mlist.m.pair[0] = ldir.pair[0];
                 mlist.m.pair[1] = ldir.pair[1];
             }
 
             if mlist.type_ == LfsType::Dir as u8
-                && lfs_util::lfs_pair_cmp(lpair.as_ptr(), (*(d as *mut LfsDir)).head.as_ptr())
+                && lfs_utils::lfs_pair_cmp(lpair.as_ptr(), (*(d as *mut LfsDir)).head.as_ptr())
                     == LfsCmp::Eq as i32
             {
                 (*(d as *mut LfsDir)).head[0] = ldir.pair[0];
@@ -3337,14 +2802,14 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
             // 处理移动标记
             let mut moveid = 0x3ff;
             if lfs_gstate_hasmovehere(&lfs.gstate, pdir.pair.as_ptr()) {
-                moveid = lfs_util::lfs_tag_id(lfs.gstate.tag);
+                moveid = lfs_utils::lfs_tag_id(lfs.gstate.tag);
                 lfs_fs_prepmove(lfs, 0x3ff, core::ptr::null_mut());
                 // TODO: 处理tag调整逻辑
             }
 
             // 提交父目录更新
             let mut ppair = [pdir.pair[0], pdir.pair[1]];
-            lfs_util::lfs_pair_tole32(ldir.pair.as_mut_ptr());
+            lfs_utils::lfs_pair_tole32(ldir.pair.as_mut_ptr());
             state = lfs_dir_relocatingcommit(
                 lfs,
                 &mut pdir,
@@ -3352,7 +2817,7 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
                 LfsMattr::as_ptr(&[
                     LfsMattr {
                         tag: if moveid != 0x3ff {
-                            lfs_util::LFS_MKTAG(LfsType::Delete as u32, moveid, 0)
+                            lfs_utils::LFS_MKTAG(LfsType::Delete as u32, moveid, 0)
                         } else {
                             0
                         },
@@ -3365,7 +2830,7 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
                 ]),
                 2,
             );
-            lfs_util::lfs_pair_fromle32(ldir.pair.as_mut_ptr());
+            lfs_utils::lfs_pair_fromle32(ldir.pair.as_mut_ptr());
             if state < 0 {
                 return state;
             }
@@ -3396,14 +2861,14 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
             // 处理移动标记
             let mut moveid = 0x3ff;
             if lfs_gstate_hasmovehere(&lfs.gstate, pdir.pair.as_ptr()) {
-                moveid = lfs_util::lfs_tag_id(lfs.gstate.tag);
+                moveid = lfs_utils::lfs_tag_id(lfs.gstate.tag);
                 lfs_fs_prepmove(lfs, 0x3ff, core::ptr::null_mut());
             }
 
             // 提交前驱目录更新
             lpair[0] = pdir.pair[0];
             lpair[1] = pdir.pair[1];
-            lfs_util::lfs_pair_tole32(ldir.pair.as_mut_ptr());
+            lfs_utils::lfs_pair_tole32(ldir.pair.as_mut_ptr());
             state = lfs_dir_relocatingcommit(
                 lfs,
                 &mut pdir,
@@ -3411,14 +2876,14 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
                 LfsMattr::as_ptr(&[
                     LfsMattr {
                         tag: if moveid != 0x3ff {
-                            lfs_util::LFS_MKTAG(LfsType::Delete as u32, moveid, 0)
+                            lfs_utils::LFS_MKTAG(LfsType::Delete as u32, moveid, 0)
                         } else {
                             0
                         },
                         buffer: core::ptr::null(),
                     },
                     LfsMattr {
-                        tag: lfs_util::LFS_MKTAG(
+                        tag: lfs_utils::LFS_MKTAG(
                             LfsType::Tail as u32 + pdir.split as u32,
                             0x3ff,
                             8,
@@ -3428,7 +2893,7 @@ pub unsafe extern "C" fn lfs_dir_orphaningcommit(
                 ]),
                 2,
             );
-            lfs_util::lfs_pair_fromle32(ldir.pair.as_mut_ptr());
+            lfs_utils::lfs_pair_fromle32(ldir.pair.as_mut_ptr());
             if state < 0 {
                 return state;
             }
@@ -3801,8 +3266,8 @@ pub fn lfs_ctz_index(lfs: &mut Lfs, off: &mut LfsOff) -> i32 {
         return 0;
     }
 
-    i = (size - 4 * (lfs_util::lfs_popc((i - 1) as u32) + 2)) / b;
-    *off = size - b * i - 4 * lfs_util::lfs_popc(i as u32);
+    i = (size - 4 * (lfs_utils::lfs_popc((i - 1) as u32) + 2)) / b;
+    *off = size - b * i - 4 * lfs_utils::lfs_popc(i as u32);
     i as i32
 }
 
@@ -3829,9 +3294,9 @@ pub fn lfs_ctz_find(
     let target = lfs_ctz_index(lfs, &pos_arg);
 
     while current > target {
-        let skip = lfs_util::lfs_min(
-            (lfs_util::lfs_npw2(current - target + 1) - 1) as LfsSize,
-            lfs_util::lfs_ctz(current),
+        let skip = lfs_utils::lfs_min(
+            (lfs_utils::lfs_npw2(current - target + 1) - 1) as LfsSize,
+            lfs_utils::lfs_ctz(current),
         );
 
         let mut new_head = 0u32;
@@ -4423,7 +3888,7 @@ pub unsafe extern "C" fn lfs_file_close_(lfs: *mut Lfs, file: *mut LfsFile) -> i
 
     if let Some(cfg) = unsafe { (*file).cfg.as_ref() } {
         if cfg.buffer.is_null() {
-            lfs_util::lfs_free((*file).cache.buffer as *mut c_void);
+            lfs_utils::lfs_free((*file).cache.buffer as *mut c_void);
         }
     }
 
@@ -4652,7 +4117,7 @@ pub fn lfs_file_flush(lfs: &mut Lfs, file: &mut LfsFile) -> LfsSsize {
                     }
                 }
             } else {
-                file.pos = lfs_util::lfs_max(file.pos, file.ctz.size);
+                file.pos = lfs_utils::lfs_max(file.pos, file.ctz.size);
             }
 
             // Update metadata
@@ -4680,7 +4145,7 @@ pub unsafe fn lfs_file_sync_(lfs: *mut Lfs, file: *mut LfsFile) -> LfsError {
     }
 
     if ((*file).flags & LfsOpenFlags::Dirty as u32) != 0
-        && !lfs_util::lfs_pair_isnull((*file).m.pair.as_ptr())
+        && !lfs_utils::lfs_pair_isnull((*file).m.pair.as_ptr())
     {
         if (*file).flags & LfsOpenFlags::Inline as u32 == 0 {
             err = lfs_bd_sync(lfs, &mut (*lfs).pcache, &mut (*lfs).rcache, false);
@@ -4700,18 +4165,18 @@ pub unsafe fn lfs_file_sync_(lfs: *mut Lfs, file: *mut LfsFile) -> LfsError {
         } else {
             type_ = LfsType::CtzStruct as u16;
             ctz = (*file).ctz.clone();
-            lfs_util::lfs_ctz_tole32(&mut ctz);
+            lfs_utils::lfs_ctz_tole32(&mut ctz);
             buffer = &ctz as *const _ as *const c_void;
             size = core::mem::size_of::<LfsCtz>() as LfsSize;
         }
 
         let attrs = [
             LfsMattr {
-                tag: lfs_util::LFS_MKTAG(type_, (*file).id, size),
+                tag: lfs_utils::LFS_MKTAG(type_, (*file).id, size),
                 buffer,
             },
             LfsMattr {
-                tag: lfs_util::LFS_MKTAG(
+                tag: lfs_utils::LFS_MKTAG(
                     LfsType::FromUserAttrs as u32,
                     (*file).id,
                     (*(*file).cfg).attr_count,
@@ -5728,7 +5193,7 @@ pub unsafe extern "C" fn lfs_init(lfs: *mut Lfs, cfg: *const LfsConfig) -> LfsEr
     assert!((*cfg).block_size >= 128, "Block size too small");
     let divisor = (*cfg).block_size - 2 * 4;
     let value = 0xFFFFFFFFu32 / divisor;
-    let npw2 = lfs_util::lfs_npw2(value);
+    let npw2 = lfs_utils::lfs_npw2(value);
     assert!(4 * npw2 <= (*cfg).block_size, "CTZ math broken");
 
     // 检查块循环配置
@@ -5830,9 +5295,9 @@ pub unsafe extern "C" fn lfs_init(lfs: *mut Lfs, cfg: *const LfsConfig) -> LfsEr
     (*lfs).inline_max = if (*cfg).inline_max == LfsSize::MAX {
         0
     } else if (*cfg).inline_max == 0 {
-        let min_val = lfs_util::lfs_min(
+        let min_val = lfs_utils::lfs_min(
             (*cfg).cache_size,
-            lfs_util::lfs_min(
+            lfs_utils::lfs_min(
                 (*lfs).attr_max,
                 ((if (*cfg).metadata_max != 0 {
                     (*cfg).metadata_max
@@ -6524,8 +5989,8 @@ pub unsafe extern "C" fn lfs_fs_parent_match(
         return err;
     }
 
-    lfs_util::lfs_pair_fromle32(&mut child);
-    match lfs_util::lfs_pair_cmp(&child, &find.pair) {
+    lfs_utils::lfs_pair_fromle32(&mut child);
+    match lfs_utils::lfs_pair_cmp(&child, &find.pair) {
         LfsCmp::Eq => LfsCmp::Eq as i32,
         _ => LfsCmp::Lt as i32,
     }
@@ -7018,7 +6483,7 @@ pub(crate) fn lfs_fs_grow_(lfs: &mut Lfs, block_count: LfsSize) -> i32 {
 
 //  lfs1_crc
 pub(crate) fn lfs1_crc(crc: &mut u32, buffer: *const c_void, size: usize) {
-    *crc = lfs_util::lfs_crc(*crc, buffer, size);
+    *crc = lfs_utils::lfs_crc(*crc, buffer, size);
 }
 
 //  lfs1_bd_read
@@ -7068,16 +6533,16 @@ pub unsafe extern "C" fn lfs1_bd_crc(
 
 //  lfs1_dir_fromle32
 pub(crate) fn lfs1_dir_fromle32(d: &mut LfsMdir) {
-    d.rev = lfs_util::lfs_fromle32(d.rev);
-    d.tail[0] = lfs_util::lfs_fromle32(d.tail[0]);
-    d.tail[1] = lfs_util::lfs_fromle32(d.tail[1]);
+    d.rev = lfs_utils::lfs_fromle32(d.rev);
+    d.tail[0] = lfs_utils::lfs_fromle32(d.tail[0]);
+    d.tail[1] = lfs_utils::lfs_fromle32(d.tail[1]);
 }
 
 //  lfs1_dir_tole32
 pub fn lfs1_dir_tole32(d: &mut LfsMdir) {
-    d.rev = crate::lfs_util::lfs_tole32(d.rev);
-    d.tail[0] = crate::lfs_util::lfs_tole32(d.tail[0]);
-    d.tail[1] = crate::lfs_util::lfs_tole32(d.tail[1]);
+    d.rev = crate::lfs_utils::lfs_tole32(d.rev);
+    d.tail[0] = crate::lfs_utils::lfs_tole32(d.tail[0]);
+    d.tail[1] = crate::lfs_utils::lfs_tole32(d.tail[1]);
 }
 
 //  lfs1_entry_fromle32
@@ -7089,15 +6554,15 @@ pub(crate) fn lfs1_entry_fromle32(d: &mut LfsMdir) {
 //  lfs1_entry_tole32
 #[inline]
 pub(crate) unsafe fn lfs1_entry_tole32(d: *mut lfs1_disk_entry) {
-    (*d).u.dir[0] = lfs_util::lfs_tole32((*d).u.dir[0]);
-    (*d).u.dir[1] = lfs_util::lfs_tole32((*d).u.dir[1]);
+    (*d).u.dir[0] = lfs_utils::lfs_tole32((*d).u.dir[0]);
+    (*d).u.dir[1] = lfs_utils::lfs_tole32((*d).u.dir[1]);
 }
 
 //  lfs1_superblock_fromle32
 pub(crate) fn lfs1_superblock_fromle32(d: &mut LfsSuperblock) {
-    d.block_size = lfs_util::lfs_fromle32(d.block_size);
-    d.block_count = lfs_util::lfs_fromle32(d.block_count);
-    d.version = lfs_util::lfs_fromle32(d.version);
+    d.block_size = lfs_utils::lfs_fromle32(d.block_size);
+    d.block_count = lfs_utils::lfs_fromle32(d.block_count);
+    d.version = lfs_utils::lfs_fromle32(d.version);
 }
 
 //  lfs1_entry_size
@@ -7260,7 +6725,7 @@ pub unsafe extern "C" fn lfs1_dir_next(lfs: *mut Lfs, dir: *mut LfsDir, entry: *
 pub unsafe extern "C" fn lfs1_moved(lfs: *mut Lfs, e: *const c_void) -> i32 {
     // Check if lfs1's root is null
     let lfs1 = (*lfs).lfs1 as *const Lfs;
-    if lfs_util::lfs_pair_isnull((*lfs1).root) {
+    if lfs_utils::lfs_pair_isnull((*lfs1).root) {
         return 0;
     }
 
@@ -7284,7 +6749,7 @@ pub unsafe extern "C" fn lfs1_moved(lfs: *mut Lfs, e: *const c_void) -> i32 {
     }
 
     // Iterate through directory entries
-    while !lfs_util::lfs_pair_isnull(cwd.tail) {
+    while !lfs_utils::lfs_pair_isnull(cwd.tail) {
         err = lfs1_dir_fetch(lfs, &mut cwd, cwd.tail.as_ptr());
         if err != 0 {
             return err;
@@ -7376,7 +6841,7 @@ pub unsafe fn lfs1_mount(lfs: &mut Lfs, lfs1: *mut c_void, cfg: &LfsConfig) -> L
 
     // Verify superblock magic
     if err != LfsError::Ok || superblock.magic != *b"littlefs" {
-        lfs_util::lfs_error("Invalid superblock at {0x0, 0x1}");
+        lfs_utils::lfs_error("Invalid superblock at {0x0, 0x1}");
         err = LfsError::Corrupt;
         goto_cleanup!();
     }
@@ -7385,7 +6850,7 @@ pub unsafe fn lfs1_mount(lfs: &mut Lfs, lfs1: *mut c_void, cfg: &LfsConfig) -> L
     let major_version = (0xffff & (superblock.version >> 16)) as u16;
     let minor_version = (0xffff & (superblock.version >> 0)) as u16;
     if major_version != LFS1_DISK_VERSION_MAJOR || minor_version > LFS1_DISK_VERSION_MINOR {
-        lfs_util::lfs_error("Invalid version v{}.{}", major_version, minor_version);
+        lfs_utils::lfs_error("Invalid version v{}.{}", major_version, minor_version);
         err = LfsError::Inval;
         goto_cleanup!();
     }
@@ -7672,7 +7137,7 @@ pub unsafe extern "C" fn lfs_format(lfs: *mut Lfs, cfg: *const LfsConfig) -> i32
     }
 
     // LFS_TRACE
-    lfs_util::trace!(
+    lfs_utils::trace!(
         "lfs_format({:p}, {:p} {{.context={:p}, .read={:p}, .prog={:p}, .erase={:p}, .sync={:p}, \
         .read_size={}, .prog_size={}, .block_size={}, .block_count={}, .block_cycles={}, \
         .cache_size={}, .lookahead_size={}, .read_buffer={:p}, .prog_buffer={:p}, \
@@ -7702,7 +7167,7 @@ pub unsafe extern "C" fn lfs_format(lfs: *mut Lfs, cfg: *const LfsConfig) -> i32
     // Call actual format implementation
     err = lfs_format_(lfs, cfg);
 
-    lfs_util::trace!("lfs_format -> {}", err);
+    lfs_utils::trace!("lfs_format -> {}", err);
 
     // LFS_UNLOCK
     if let Some(unlock_fn) = cfg_ref.unlock {
@@ -7724,7 +7189,7 @@ pub unsafe extern "C" fn lfs_mount(lfs: *mut Lfs, cfg: *const LfsConfig) -> i32 
     }
 
     // Trace mount parameters
-    lfs_util::trace!(
+    lfs_utils::trace!(
         "lfs_mount({:p}, {:p} {{.context={:p}, .read={:p}, .prog={:p}, .erase={:p}, .sync={:p}, \
         .read_size={}, .prog_size={}, .block_size={}, .block_count={}, .block_cycles={}, \
         .cache_size={}, .lookahead_size={}, .read_buffer={:p}, .prog_buffer={:p}, \
@@ -7755,7 +7220,7 @@ pub unsafe extern "C" fn lfs_mount(lfs: *mut Lfs, cfg: *const LfsConfig) -> i32 
     let err = lfs_mount_(lfs, cfg);
 
     // Trace result and unlock
-    lfs_util::trace!("lfs_mount -> {}", err);
+    lfs_utils::trace!("lfs_mount -> {}", err);
     (*cfg).unlock.map(|f| f(cfg));
     err
 }
@@ -7826,14 +7291,14 @@ pub fn lfs_rename(lfs: &mut Lfs, oldpath: *const c_char, newpath: *const c_char)
         return err;
     }
 
-    lfs_util::trace!("lfs_rename({:p}, \"{}\", \"{}\")", 
+    lfs_utils::trace!("lfs_rename({:p}, \"{}\", \"{}\")", 
         lfs as *const _ as *mut c_void,
         unsafe { CStr::from_ptr(oldpath).to_string_lossy() },
         unsafe { CStr::from_ptr(newpath).to_string_lossy() });
 
     let err = unsafe { lfs_rename_(lfs, oldpath, newpath) };
 
-    lfs_util::trace!("lfs_rename -> {}", err);
+    lfs_utils::trace!("lfs_rename -> {}", err);
 
     if let Some(unlock) = cfg.unlock {
         unsafe { unlock(cfg) };
@@ -7940,7 +7405,7 @@ pub unsafe extern "C" fn lfs_setattr(
     };
 
     // 记录调试跟踪信息
-    lfs_util::lfs_trace!(
+    lfs_utils::lfs_trace!(
         "lfs_setattr({:p}, \"{}\", {}, {:p}, {})",
         lfs,
         path_str,
@@ -7953,7 +7418,7 @@ pub unsafe extern "C" fn lfs_setattr(
     let err = lfs_setattr_(lfs, path, type_, buffer, size);
 
     // 记录返回结果
-    lfs_util::lfs_trace!("lfs_setattr -> {}", err);
+    lfs_utils::lfs_trace!("lfs_setattr -> {}", err);
 
     // 解锁操作
     if let Some(unlock_fn) = cfg.unlock {
@@ -7972,7 +7437,7 @@ pub unsafe extern "C" fn lfs_removeattr(lfs: *mut Lfs, path: *const c_char, type
         return err;
     }
 
-    lfs_util::trace!(
+    lfs_utils::trace!(
         "lfs_removeattr({:p}, \"{}\", {})",
         lfs,
         core::ffi::CStr::from_ptr(path).to_str().unwrap(),
@@ -7981,7 +7446,7 @@ pub unsafe extern "C" fn lfs_removeattr(lfs: *mut Lfs, path: *const c_char, type
 
     let err = lfs_removeattr_(lfs, path, type_);
 
-    lfs_util::trace!("lfs_removeattr -> {}", err);
+    lfs_utils::trace!("lfs_removeattr -> {}", err);
     
     let unlock = (*cfg).unlock.unwrap();
     unlock(cfg);
@@ -8004,7 +7469,7 @@ pub fn lfs_file_open(
     }
 
     // 跟踪调试信息
-    lfs_util::trace!(
+    lfs_utils::trace!(
         "lfs_file_open({:p}, {:p}, \"{}\", {:x})",
         lfs as *const _,
         file as *const _,
@@ -8022,7 +7487,7 @@ pub fn lfs_file_open(
     let err = lfs_file_open_(lfs, file, path, flags);
 
     // 跟踪返回结果
-    lfs_util::trace!("lfs_file_open -> {}", err);
+    lfs_utils::trace!("lfs_file_open -> {}", err);
 
     // 解锁设备
     unsafe { (*cfg).unlock.map(|f| f(cfg)) };
@@ -8054,7 +7519,7 @@ pub unsafe extern "C" fn lfs_file_opencfg(
     // TRACE日志
     let path_str = CStr::from_ptr(path).to_string_lossy();
     let cfg_attrs_count = if cfg.is_null() { 0 } else { (*cfg).attr_count };
-    let _ = lfs_util::trace!(
+    let _ = lfs_utils::trace!(
         "lfs_file_opencfg({:p}, {:p}, \"{}\", {:x}, {:p} {{ .buffer={:p}, .attrs={:p}, .attr_count={} }})",
         lfs,
         file,
@@ -8076,7 +7541,7 @@ pub unsafe extern "C" fn lfs_file_opencfg(
     let err = lfs_file_opencfg_(lfs, file, path, flags, cfg);
 
     // TRACE结果
-    let _ = lfs_util::trace!("lfs_file_opencfg -> {}", err);
+    let _ = lfs_utils::trace!("lfs_file_opencfg -> {}", err);
 
     // UNLOCK操作
     if let Some(unlock_fn) = (*cfg_ptr).unlock {
@@ -8101,7 +7566,7 @@ pub unsafe extern "C" fn lfs_file_close(lfs: *mut Lfs, file: *mut LfsFile) -> i3
     }
 
     // Log trace
-    lfs_util::lfs_trace!("lfs_file_close({:p}, {:p})", lfs, file);
+    lfs_utils::lfs_trace!("lfs_file_close({:p}, {:p})", lfs, file);
 
     // Verify file is in open list
     let mlist_ptr = file as *mut LfsMlist;
@@ -8111,7 +7576,7 @@ pub unsafe extern "C" fn lfs_file_close(lfs: *mut Lfs, file: *mut LfsFile) -> i3
     let err = lfs_file_close_(lfs, file);
 
     // Log result
-    lfs_util::lfs_trace!("lfs_file_close -> {}", err);
+    lfs_utils::lfs_trace!("lfs_file_close -> {}", err);
 
     // Release lock
     if let Some(unlock_fn) = cfg.unlock {
@@ -8136,7 +7601,7 @@ pub unsafe extern "C" fn lfs_file_sync(lfs: *mut Lfs, file: *mut LfsFile) -> i32
     }
     
     // Trace
-    lfs_util::lfs_trace!("lfs_file_sync({:p}, {:p})", lfs as *mut c_void, file as *mut c_void);
+    lfs_utils::lfs_trace!("lfs_file_sync({:p}, {:p})", lfs as *mut c_void, file as *mut c_void);
     
     // Assert
     debug_assert!(lfs_mlist_isopen((*lfs).mlist, file as *mut LfsMlist));
@@ -8145,7 +7610,7 @@ pub unsafe extern "C" fn lfs_file_sync(lfs: *mut Lfs, file: *mut LfsFile) -> i32
     let err = lfs_file_sync_(lfs, file);
     
     // Trace result
-    lfs_util::lfs_trace!("lfs_file_sync -> {}", err);
+    lfs_utils::lfs_trace!("lfs_file_sync -> {}", err);
     
     // Unlock
     if let Some(unlock_fn) = (*cfg).unlock {
@@ -8202,7 +7667,7 @@ pub unsafe extern "C" fn lfs_file_write(
         return err as LfsSsize;
     }
 
-    lfs_util::trace!(
+    lfs_utils::trace!(
         "lfs_file_write({:p}, {:p}, {:p}, {})",
         lfs as *mut _,
         file as *mut _,
@@ -8214,7 +7679,7 @@ pub unsafe extern "C" fn lfs_file_write(
 
     let res = lfs_file_write_(lfs, file, buffer, size);
 
-    lfs_util::trace!("lfs_file_write -> {}", res);
+    lfs_utils::trace!("lfs_file_write -> {}", res);
 
     if let Some(unlock_fn) = (*cfg).unlock {
         unlock_fn(cfg);
@@ -8412,12 +7877,12 @@ pub unsafe extern "C" fn lfs_mkdir(lfs: *mut Lfs, path: *const c_char) -> i32 {
 
     // 调用底层实现
     #[cfg(feature = "trace")]
-    lfs_util::trace!("lfs_mkdir({:p}, {:?})", lfs, path);
+    lfs_utils::trace!("lfs_mkdir({:p}, {:?})", lfs, path);
     
     let err = lfs_mkdir_(lfs, path);
     
     #[cfg(feature = "trace")]
-    lfs_util::trace!("lfs_mkdir -> {}", err);
+    lfs_utils::trace!("lfs_mkdir -> {}", err);
 
     err
 }
@@ -8436,7 +7901,7 @@ pub unsafe extern "C" fn lfs_dir_open(lfs: *mut Lfs, dir: *mut LfsDir, path: *co
 
     // 调试跟踪
     let path_str = std::ffi::CStr::from_ptr(path).to_string_lossy();
-    lfs_util::trace!("lfs_dir_open({:p}, {:p}, \"{}\")", lfs, dir, path_str);
+    lfs_utils::trace!("lfs_dir_open({:p}, {:p}, \"{}\")", lfs, dir, path_str);
 
     // 断言目录未打开
     debug_assert!(!lfs_mlist_isopen((*lfs).mlist, dir as *mut LfsMlist));
@@ -8445,7 +7910,7 @@ pub unsafe extern "C" fn lfs_dir_open(lfs: *mut Lfs, dir: *mut LfsDir, path: *co
     let err = lfs_dir_open_(lfs, dir, path);
 
     // 调试跟踪结果
-    lfs_util::trace!("lfs_dir_open -> {}", err);
+    lfs_utils::trace!("lfs_dir_open -> {}", err);
 
     // UNLOCK操作
     if let Some(unlock_fn) = cfg.unlock {
@@ -8470,7 +7935,7 @@ pub unsafe extern "C" fn lfs_dir_close(lfs: *mut Lfs, dir: *mut LfsDir) -> i32 {
     }
 
     // Tracing
-    lfs_util::lfs_trace!(
+    lfs_utils::lfs_trace!(
         "lfs_dir_close({:p}, {:p})",
         lfs as *mut c_void,
         dir as *mut c_void
@@ -8480,7 +7945,7 @@ pub unsafe extern "C" fn lfs_dir_close(lfs: *mut Lfs, dir: *mut LfsDir) -> i32 {
     let err = lfs_dir_close_(lfs, dir);
 
     // Tracing result
-    lfs_util::lfs_trace!("lfs_dir_close -> {}", err);
+    lfs_utils::lfs_trace!("lfs_dir_close -> {}", err);
 
     // Unlock handling
     if let Some(unlock_fn) = (*cfg).unlock {
@@ -8503,12 +7968,12 @@ pub unsafe extern "C" fn lfs_dir_read(lfs: *mut Lfs, dir: *mut LfsDir, info: *mu
     }
 
     #[cfg(feature = "trace")]
-    lfs_util::trace!("lfs_dir_read({:p}, {:p}, {:p})", lfs, dir, info);
+    lfs_utils::trace!("lfs_dir_read({:p}, {:p}, {:p})", lfs, dir, info);
 
     let err = lfs_dir_read_(lfs, dir, info);
 
     #[cfg(feature = "trace")]
-    lfs_util::trace!("lfs_dir_read -> {}", err);
+    lfs_utils::trace!("lfs_dir_read -> {}", err);
 
     if let Some(unlock) = (*cfg).unlock {
         unlock(cfg);
@@ -8564,13 +8029,13 @@ pub unsafe extern "C" fn lfs_dir_tell(lfs: *mut Lfs, dir: *mut LfsDir) -> LfsSof
     }
 
     // Trace entry
-    lfs_util::trace!("lfs_dir_tell({:p}, {:p})", lfs as *mut c_void, dir as *mut c_void);
+    lfs_utils::trace!("lfs_dir_tell({:p}, {:p})", lfs as *mut c_void, dir as *mut c_void);
 
     // Call underlying implementation
     let res = lfs_dir_tell_(lfs, dir);
 
     // Trace result
-    lfs_util::trace!("lfs_dir_tell -> {}", res);
+    lfs_utils::trace!("lfs_dir_tell -> {}", res);
 
     // Release lock
     if let Some(unlock_fn) = cfg.unlock {
@@ -8651,13 +8116,13 @@ pub unsafe extern "C" fn lfs_fs_size(lfs: *mut Lfs) -> LfsSsize {
     }
 
     // Log trace before operation
-    lfs_util::trace!("lfs_fs_size({:p})", lfs);
+    lfs_utils::trace!("lfs_fs_size({:p})", lfs);
     
     // Perform actual size calculation
     let res = lfs_fs_size_(lfs);
     
     // Log trace with result
-    lfs_util::trace!("lfs_fs_size -> {}", res);
+    lfs_utils::trace!("lfs_fs_size -> {}", res);
     
     // Unlock the filesystem
     if let Some(unlock_fn) = (*cfg).unlock {
@@ -8686,7 +8151,7 @@ pub unsafe extern "C" fn lfs_fs_traverse(
     }
 
     // TRACE
-    lfs_util::trace(
+    lfs_utils::trace(
         "lfs_fs_traverse(%p, %p, %p)",
         lfs as *const _ as *mut c_void,
         cb.map(|f| f as *const c_void).unwrap_or(core::ptr::null()) as *mut c_void,
@@ -8697,7 +8162,7 @@ pub unsafe extern "C" fn lfs_fs_traverse(
     let err = lfs_fs_traverse_(lfs, cb, data, true);
 
     // TRACE result
-    lfs_util::trace("lfs_fs_traverse -> %d", err);
+    lfs_utils::trace("lfs_fs_traverse -> %d", err);
 
     // UNLOCK
     if let Some(unlock_fn) = cfg.unlock {
@@ -8715,11 +8180,11 @@ pub unsafe extern "C" fn lfs_fs_mkconsistent(lfs: &mut Lfs) -> i32 {
         return lock_err;
     }
 
-    lfs_util::trace!("lfs_fs_mkconsistent({:p})", lfs as *mut _);
+    lfs_utils::trace!("lfs_fs_mkconsistent({:p})", lfs as *mut _);
     
     let err = lfs_fs_mkconsistent_(lfs);
     
-    lfs_util::trace!("lfs_fs_mkconsistent -> {}", err);
+    lfs_utils::trace!("lfs_fs_mkconsistent -> {}", err);
     
     if let Some(unlock_fn) = (*cfg).unlock {
         unlock_fn(cfg);
@@ -8741,11 +8206,11 @@ pub unsafe extern "C" fn lfs_fs_gc(lfs: *mut Lfs) -> i32 {
         return err;
     }
 
-    lfs_util::trace!("lfs_fs_gc({:p})", lfs);
+    lfs_utils::trace!("lfs_fs_gc({:p})", lfs);
 
     let err = lfs_fs_gc_(lfs);
 
-    lfs_util::trace!("lfs_fs_gc -> {}", err);
+    lfs_utils::trace!("lfs_fs_gc -> {}", err);
 
     if let Some(unlock_fn) = (*cfg).unlock {
         unlock_fn(cfg);
@@ -8766,13 +8231,13 @@ pub unsafe extern "C" fn lfs_fs_grow(lfs: *mut Lfs, block_count: LfsSize) -> Lfs
     }
 
     // Trace call
-    lfs_util::trace!("lfs_fs_grow({:p}, {})", lfs, block_count);
+    lfs_utils::trace!("lfs_fs_grow({:p}, {})", lfs, block_count);
 
     // Perform actual grow operation
     let result = lfs_fs_grow_(lfs, block_count);
 
     // Trace result
-    lfs_util::trace!("lfs_fs_grow -> {}", result as i32);
+    lfs_utils::trace!("lfs_fs_grow -> {}", result as i32);
 
     // Release lock
     let unlock = (*cfg).unlock.ok_or(LfsError::Inval)?;

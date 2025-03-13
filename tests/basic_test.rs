@@ -1,4 +1,4 @@
-use littlefs_rust::{block_device::BlockDevice, filesystem::FileSystem};
+use littlefs_rust::{block_device::BlockDevice, lfs_impl_ds::FileSystem};
 use std::fs::remove_file;
 
 #[test]
