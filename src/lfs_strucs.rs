@@ -42,6 +42,54 @@
  /// 限制为 <= 1022。存储在超级块中，其他littlefs驱动程序必须遵守
  pub const LFS_ATTR_MAX: usize = 1022;
  
+ #[inline]
+ pub const fn lfs_mktag(type_: u32, id: u32, size: u32) -> LfsTag {
+     ((type_ & 0xfff) << 20) | ((id & 0x3ff) << 10) | (size & 0x3ff)
+ }
+ 
+ /// 根据条件创建标签，如果条件为假则创建一个NOOP标签
+ /// 
+ /// # Arguments
+ /// * `cond` - 条件
+ /// * `type_` - 类型值
+ /// * `id` - ID值
+ /// * `size` - 大小值
+ /// 
+ /// # Returns
+ /// * `LfsTag` - 根据条件创建的标签值
+ #[inline]
+ pub const fn lfs_mktag_if(cond: bool, type_: u32, id: u32, size: u32) -> LfsTag {
+     if cond {
+         lfs_mktag(type_, id, size)
+     } else {
+         lfs_mktag(LfsType::FromNoop as u32, 0, 0)
+     }
+ }
+ 
+ /// 根据条件创建两种不同的标签之一
+ /// 
+ /// # Arguments
+ /// * `cond` - 条件
+ /// * `type1` - 条件为真时的类型值
+ /// * `id1` - 条件为真时的ID值
+ /// * `size1` - 条件为真时的大小值
+ /// * `type2` - 条件为假时的类型值
+ /// * `id2` - 条件为假时的ID值
+ /// * `size2` - 条件为假时的大小值
+ /// 
+ /// # Returns
+ /// * `LfsTag` - 根据条件创建的标签值
+ #[inline]
+ pub const fn lfs_mktag_if_else(cond: bool, 
+     type1: u32, id1: u32, size1: u32,
+     type2: u32, id2: u32, size2: u32) -> LfsTag {
+     if cond {
+         lfs_mktag(type1, id1, size1)
+     } else {
+         lfs_mktag(type2, id2, size2)
+     }
+ }
+
  /// 可能的错误代码，这些是负数以允许有效的正返回值
  #[repr(i32)]
  #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -85,17 +133,17 @@
      Create = 0x401,
      Delete = 0x4ff,
      SuperBlock = 0x0ff,
-     DirStruct = 0x200,
-     CtzStruct = 0x202,
-     InlineStruct = 0x201,
-     SoftTail = 0x600,
-     HardTail = 0x601,
+     DirStruct = 0x201,
+     CtzStruct = 0x203,
+     InlineStruct = 0x202,
+     SoftTail = 0x601,
+     HardTail = 0x602,
      MoveState = 0x7ff,
-     CCrc = 0x500,
+     CCrc = 0x501,
      FCrc = 0x5ff,
  
      // 内部芯片源
-     FromNoop = 0x000,
+     FromNoop = 0x003,
      FromMove = 0x101,
      FromUserAttrs = 0x102,
  }
@@ -311,6 +359,18 @@
      pub size: LfsSize,
      pub buffer: *mut u8,
  }
+
+ impl LfsCache {
+    /// 创建一个不可用的空缓存
+    pub fn default() -> Self {
+        LfsCache {
+            block: LFS_BLOCK_NULL,       // 默认块编号为0
+            off: 0,         // 偏移量为0
+            size: 0,        // 缓存大小为0
+            buffer: core::ptr::null_mut(), // 空指针表示无效的缓冲区
+        }
+    }
+}
  
  /// 元数据目录结构
  #[derive(Debug, Clone)]

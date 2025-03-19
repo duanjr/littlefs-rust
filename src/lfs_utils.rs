@@ -1,9 +1,9 @@
-
 /// CRC32计算函数，基于多项式0x04c11db7
 /// 
 /// * `crc`: 初始CRC值
 /// * `buffer`: 要计算的数据缓冲区
 /// * `size`: 数据长度
+use core::ffi::c_void;
 pub fn lfs_crc(mut crc: u32, buffer: &[u8]) -> u32 {
     // CRC表
     const RTABLE: [u32; 16] = [
@@ -110,6 +110,13 @@ pub fn lfs_frombe32(a: u32) -> u32 {
 /// 在本机字节序和32位大端字节序之间转换
 pub fn lfs_tobe32(a: u32) -> u32 {
     lfs_frombe32(a)
+}
+
+pub unsafe fn lfs_free(p: *mut c_void) {
+    if !p.is_null() {
+        // 将原始指针转换回 Box 并让它自动释放
+        let _ = Box::from_raw(p as *mut u8);
+    }
 }
 
 #[cfg(test)]
