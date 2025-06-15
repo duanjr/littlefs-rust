@@ -1,0 +1,9 @@
+[package]
+name = "lfs_pure_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+once_cell = "1.21.3"
+libc = "0.2"
+rand = "0.9.1"
